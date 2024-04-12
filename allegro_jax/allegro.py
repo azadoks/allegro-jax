@@ -84,11 +84,11 @@ def allegro_call(
     Linear,
     MultiLayerPerceptron,
     self,
-    node_attrs: jnp.ndarray,  # jax.nn.one_hot(z, num_species)
+    node_attrs: e3nn.IrrepsArray,  # jax.nn.one_hot(z, num_species)
     vectors: e3nn.IrrepsArray,  # [n_edges, 3]
     senders: jnp.ndarray,  # [n_edges]
     receivers: jnp.ndarray,  # [n_edges]
-    edge_feats: Optional[e3nn.IrrepsArray] = None,  # [n_edges, irreps]
+    edge_attrs: Optional[e3nn.IrrepsArray] = None,  # [n_edges, irreps]
 ) -> e3nn.IrrepsArray:
     num_edges = vectors.shape[0]
     num_nodes = node_attrs.shape[0]
@@ -110,12 +110,12 @@ def allegro_call(
     x = jnp.concatenate(
         [
             normalized_bessel(d, self.n_radial_basis),
-            node_attrs[senders],
-            node_attrs[receivers],
+            node_attrs[senders].filter(keep='0e').array,
+            node_attrs[receivers].filter(keep='0e').array,
         ],
         axis=1,
     )
-    assert x.shape == (num_edges, self.n_radial_basis + 2 * node_attrs.shape[-1])
+    # assert x.shape == (num_edges, self.n_radial_basis + 2 * node_attrs.shape[-1])
 
     # Protection against exploding dummy edges:
     x = jnp.where(d[:, None] == 0.0, 0.0, x)
@@ -136,12 +136,19 @@ def allegro_call(
     irreps_Y = irreps_layers[0].filter(
         keep=lambda mir: vectors.irreps[0].ir.p ** mir.ir.l == mir.ir.p
     )
-    V = e3nn.spherical_harmonics(irreps_Y, vectors, True)
+    Y = e3nn.spherical_harmonics(irreps_Y, vectors, True)
 
-    if edge_feats is not None:
-        V = e3nn.concatenate([V, edge_feats])
-    w = MultiLayerPerceptron((V.irreps.num_irreps,), act=None)(x)
-    V = w * V
+    if edge_attrs is not None:
+        Y = e3nn.concatenate([
+            Y,
+            edge_attrs,
+            node_attrs[senders].filter(drop='0e'),
+            node_attrs[receivers].filter(drop='0e')
+        ])
+
+    w = MultiLayerPerceptron((Y.irreps.num_irreps,), act=None)(x)
+
+    V = w * Y
     assert V.shape == (num_edges, V.irreps.dim)
 
     for irreps in irreps_layers[1:]:
@@ -167,3 +174,27 @@ def allegro_call(
         raise ValueError(f"output_irreps {irreps_out} is not reachable")
 
     return xV
+
+
+
+
+# y - scalar attributes (1Hot(Z), B(rij))
+# Y - non-scalar attributes (Y(řij), n^ + nv, n^ tp nv)
+# x - latent scalar features
+# V - latent non-scalar features
+# u - radial cutoff function
+
+
+# Setup
+# x0 = MLP_tb(scalars) * u(rij)
+# w0 = MLP_0(x0)
+# V0 = w0 * non-scalars
+# ----
+# Loop
+# wL = MLP_L(x{L-1})
+# VL = V{L-1} x (wL * (Y | non-scalars))
+# xL = MLP_L(x{L-1} || scalars(VL)) * u(rij)
+# VL = Linear_L(VL)
+# ----
+# Readout
+# yhat = Linear_out(MLP_out(xN) || VN)
